@@ -1,0 +1,16 @@
+data_root: data
+train_json: data/binary_classification/binary_classification/train.json
+test_json: data/binary_classification/binary_classification/test.json
+train_cache: artifacts/features/binary_train_whisper_small_roberta.pt
+test_cache: artifacts/features/binary_test_whisper_small_roberta.pt
+audio_model: openai/whisper-small
+text_model: hfl/chinese-roberta-wwm-ext
+max_audio_seconds: 30
+max_text_length: 256
+cache_batch_size: 4
+train_batch_size: 64
+epochs: 20
+learning_rate: 0.001
+hidden_dim: 256
+dropout: 0.2
+device: cuda

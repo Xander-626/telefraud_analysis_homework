@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Model artifacts and training outputs
+artifacts/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Large local dataset payloads
+data/audio/
+data/binary_classification/
+data/sft/
+data/viewer/
+data/preview/
+*.zip
+*.parquet
+
+# Keep lightweight dataset metadata
+!data/README.md
+!data/dataset_manifest.json
+!data/gitattributes
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

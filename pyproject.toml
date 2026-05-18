@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teledeceit-analysis"
+version = "0.1.0"
+description = "Audio-text fraud detection framework for TeleAntiFraud."
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "torchaudio",
+  "transformers",
+  "tqdm",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
