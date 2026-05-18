@@ -3,3 +3,6 @@ torchaudio
 transformers
 tqdm
 scikit-learn
+reportlab
+pdfplumber
+pypdf

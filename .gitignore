@@ -19,6 +19,7 @@ env/
 artifacts/
 runs/
 checkpoints/
+tmp/
 *.pt
 *.pth
 *.ckpt
