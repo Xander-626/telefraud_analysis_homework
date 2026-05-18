@@ -94,6 +94,8 @@ class WhisperAudioEncoder:
 
     @torch.no_grad()
     def encode(self, paths: list[Path]) -> torch.Tensor:
+        import torch.nn.functional as F
+
         waves = [self._load_audio(path) for path in paths]
         inputs = self.processor(
             waves,
@@ -102,18 +104,67 @@ class WhisperAudioEncoder:
             padding=True,
         )
         input_features = inputs.input_features.to(self.device)
+        # Pad to the fixed 3000-frame length Whisper expects
+        expected_len = 3000
+        cur_len = input_features.shape[-1]
+        if cur_len < expected_len:
+            pad_amount = expected_len - cur_len
+            input_features = F.pad(input_features, (0, pad_amount))
+        elif cur_len > expected_len:
+            input_features = input_features[..., :expected_len]
         hidden = self.model(input_features=input_features).last_hidden_state
         return hidden.mean(dim=1)
 
     def _load_audio(self, path: Path) -> torch.Tensor:
         if not path.exists():
             raise FileNotFoundError(f"Audio file not found: {path}")
-        waveform, sample_rate = self.torchaudio.load(str(path))
-        waveform = waveform.mean(dim=0)
-        if sample_rate != self.sample_rate:
-            waveform = self.torchaudio.functional.resample(waveform, sample_rate, self.sample_rate)
+        waveform = self._load_audio_torchaudio(path)
         max_samples = int(self.max_seconds * self.sample_rate)
         return waveform[:max_samples].numpy()
+
+    def _load_audio_torchaudio(self, path: Path):
+        try:
+            waveform, sample_rate = self.torchaudio.load(str(path))
+        except RuntimeError:
+            waveform, sample_rate = self._load_audio_ffmpeg(path)
+        waveform = waveform.mean(dim=0) if waveform.dim() > 1 else waveform
+        if sample_rate != self.sample_rate:
+            waveform = self.torchaudio.functional.resample(waveform, sample_rate, self.sample_rate)
+        return waveform
+
+    def _load_audio_ffmpeg(self, path: Path):
+        import subprocess
+        import numpy as np
+
+        ffmpeg_exe = self._find_ffmpeg()
+        cmd = [
+            ffmpeg_exe, "-i", str(path),
+            "-f", "s16le", "-ac", "1", "-ar", str(self.sample_rate),
+            "-", "-loglevel", "error",
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()}")
+        audio = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+        return torch.from_numpy(audio).float(), self.sample_rate
+
+    @staticmethod
+    def _find_ffmpeg() -> str:
+        import shutil
+        which = shutil.which("ffmpeg")
+        if which:
+            return which
+        import os
+        winget_root = os.environ.get("LOCALAPPDATA", "")
+        candidate = os.path.join(
+            winget_root,
+            "Microsoft", "WinGet", "Packages",
+            "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe",
+            "ffmpeg-8.1.1-full_build", "bin", "ffmpeg.exe",
+        )
+        if os.path.isfile(candidate):
+            return candidate
+        raise RuntimeError("ffmpeg not found; install it or add it to PATH")
 
 
 class TransformerTextEncoder:

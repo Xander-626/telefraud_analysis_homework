@@ -38,6 +38,9 @@ data/preview/
 !data/dataset_manifest.json
 !data/gitattributes
 
+# Claude Code
+.claude/
+
 # OS/editor
 .DS_Store
 Thumbs.db
