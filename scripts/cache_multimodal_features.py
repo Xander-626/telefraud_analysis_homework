@@ -30,6 +30,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-text-length", default=256, type=int)
     parser.add_argument("--limit", default=None, type=int)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--use-asr",
+        action="store_true",
+        help="Transcribe audio with Whisper and use ASR text as RoBERTa input instead of prompt text",
+    )
     return parser.parse_args()
 
 
@@ -44,6 +49,7 @@ def main() -> None:
         model_name=args.audio_model,
         device=device,
         max_seconds=args.max_audio_seconds,
+        load_for_asr=args.use_asr,
     )
     text_encoder = TransformerTextEncoder(
         model_name=args.text_model,
@@ -56,41 +62,92 @@ def main() -> None:
     text_features: list[torch.Tensor] = []
     labels: list[int] = []
     audio_paths: list[str] = []
+    asr_texts: list[str] = []
 
-    for batch in tqdm(list(_batched(samples, args.batch_size)), desc="Caching features"):
+    desc = "Caching features (ASR mode)" if args.use_asr else "Caching features"
+    for batch in tqdm(list(_batched(samples, args.batch_size)), desc=desc):
+        batch_audio_paths = [sample.audio_path for sample in batch]
         sample_ids.extend(sample.sample_id for sample in batch)
-        audio_paths.extend(str(sample.audio_path) for sample in batch)
+        audio_paths.extend(str(p) for p in batch_audio_paths)
         labels.extend(sample.label for sample in batch)
-        audio_features.append(audio_encoder.encode([sample.audio_path for sample in batch]).cpu())
-        text_features.append(text_encoder.encode([sample.text for sample in batch]).cpu())
+        audio_features.append(audio_encoder.encode(batch_audio_paths).cpu())
+
+        if args.use_asr:
+            transcriptions = audio_encoder.transcribe(batch_audio_paths)
+            asr_texts.extend(transcriptions)
+            text_features.append(text_encoder.encode(transcriptions).cpu())
+        else:
+            text_features.append(text_encoder.encode([sample.text for sample in batch]).cpu())
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "sample_id": sample_ids,
-            "audio_path": audio_paths,
-            "audio_features": torch.cat(audio_features, dim=0),
-            "text_features": torch.cat(text_features, dim=0),
-            "labels": torch.tensor(labels, dtype=torch.long),
-            "audio_model": args.audio_model,
-            "text_model": args.text_model,
-        },
-        args.output,
-    )
+    cache_data: dict[str, object] = {
+        "sample_id": sample_ids,
+        "audio_path": audio_paths,
+        "audio_features": torch.cat(audio_features, dim=0),
+        "text_features": torch.cat(text_features, dim=0),
+        "labels": torch.tensor(labels, dtype=torch.long),
+        "audio_model": args.audio_model,
+        "text_model": args.text_model,
+        "use_asr": args.use_asr,
+    }
+    if args.use_asr:
+        cache_data["asr_texts"] = asr_texts
+    torch.save(cache_data, args.output)
     print(f"Saved {len(sample_ids)} rows to {args.output}")
 
 
 class WhisperAudioEncoder:
-    def __init__(self, model_name: str, device: torch.device, max_seconds: float) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: torch.device,
+        max_seconds: float,
+        load_for_asr: bool = False,
+    ) -> None:
         import torchaudio
         from transformers import WhisperModel, WhisperProcessor
 
         self.torchaudio = torchaudio
-        self.processor = WhisperProcessor.from_pretrained(model_name)
-        self.model = WhisperModel.from_pretrained(model_name).encoder.to(device).eval()
+        self.processor = WhisperProcessor.from_pretrained(model_name, local_files_only=True)
         self.device = device
         self.max_seconds = max_seconds
         self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
+        self._asr_model: object = None
+
+        if load_for_asr:
+            from transformers import WhisperForConditionalGeneration
+
+            asr_model = WhisperForConditionalGeneration.from_pretrained(
+                model_name, torch_dtype=torch.float16, local_files_only=True
+            ).to(device).eval()
+            # Rebuild generation config from tokenizer since cached version is missing/outdated
+            from transformers import GenerationConfig
+
+            tokenizer = self.processor.tokenizer
+            lang_to_id = {}
+            for tid in range(50259, 50358):
+                tok = tokenizer.decode([tid])
+                if tok.startswith("<|") and tok.endswith("|>"):
+                    lang_to_id[tok.strip("<>|")] = tid
+            gen_config = GenerationConfig(
+                lang_to_id=lang_to_id,
+                task_to_id={
+                    "transcribe": int(tokenizer.convert_tokens_to_ids("<|transcribe|>")),
+                    "translate": int(tokenizer.convert_tokens_to_ids("<|translate|>")),
+                },
+                language="zh",
+                task="transcribe",
+                max_length=256,
+                decoder_start_token_id=int(tokenizer.convert_tokens_to_ids("<|startoftranscript|>")),
+                bos_token_id=int(tokenizer.convert_tokens_to_ids("<|startoftranscript|>")),
+                eos_token_id=int(tokenizer.convert_tokens_to_ids("<|endoftext|>")),
+                pad_token_id=int(tokenizer.convert_tokens_to_ids("<|endoftext|>")),
+            )
+            asr_model.generation_config = gen_config
+            self._asr_model = asr_model
+            self.model = asr_model.model.encoder
+        else:
+            self.model = WhisperModel.from_pretrained(model_name).encoder.to(device).eval()
 
     @torch.no_grad()
     def encode(self, paths: list[Path]) -> torch.Tensor:
@@ -103,7 +160,10 @@ class WhisperAudioEncoder:
             return_tensors="pt",
             padding=True,
         )
-        input_features = inputs.input_features.to(self.device)
+        input_features = inputs.input_features.to(
+            device=self.device,
+            dtype=next(self.model.parameters()).dtype,
+        )
         # Pad to the fixed 3000-frame length Whisper expects
         expected_len = 3000
         cur_len = input_features.shape[-1]
@@ -114,6 +174,30 @@ class WhisperAudioEncoder:
             input_features = input_features[..., :expected_len]
         hidden = self.model(input_features=input_features).last_hidden_state
         return hidden.mean(dim=1)
+
+    @torch.no_grad()
+    def transcribe(self, paths: list[Path]) -> list[str]:
+        """Transcribe audio to Chinese text using the full Whisper model."""
+        if self._asr_model is None:
+            raise RuntimeError("ASR model not loaded; pass load_for_asr=True")
+
+        waves = [self._load_audio(path) for path in paths]
+        inputs = self.processor(
+            waves,
+            sampling_rate=self.sample_rate,
+            return_tensors="pt",
+            padding=True,
+        )
+        input_features = inputs.input_features.to(
+            device=self.device,
+            dtype=next(self._asr_model.parameters()).dtype,
+        )
+
+        generated_ids = self._asr_model.generate(
+            input_features,
+            max_length=256,
+        )
+        return self.processor.batch_decode(generated_ids, skip_special_tokens=True)
 
     def _load_audio(self, path: Path) -> torch.Tensor:
         if not path.exists():

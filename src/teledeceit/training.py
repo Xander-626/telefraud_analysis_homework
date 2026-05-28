@@ -26,26 +26,43 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     max_grad_norm: float = 1.0,
+    grad_accum: int = 1,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     total_items = 0
+    use_amp = scaler is not None
 
-    for batch in dataloader:
+    for step, batch in enumerate(dataloader):
         batch = _move_batch(batch, device)
-        optimizer.zero_grad(set_to_none=True)
-        output = model(
-            audio_features=batch["audio_features"],
-            text_features=batch["text_features"],
-            labels=batch["labels"],
-        )
-        assert output.loss is not None
-        output.loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            output = model(
+                audio_features=batch["audio_features"],
+                text_features=batch["text_features"],
+                labels=batch["labels"],
+            )
+            assert output.loss is not None
+            loss = output.loss / grad_accum
+
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        if (step + 1) % grad_accum == 0 or (step + 1) == len(dataloader):
+            if use_amp:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         batch_size = int(batch["labels"].shape[0])
-        total_loss += float(output.loss.detach().cpu().item()) * batch_size
+        total_loss += float(output.loss.detach().cpu().item()) * batch_size * grad_accum
         total_items += batch_size
 
     return {"loss": total_loss / max(total_items, 1)}

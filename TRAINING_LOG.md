@@ -160,3 +160,169 @@ runs/binary_fusion_whisper_small_roberta/
 ## 代码修改
 
 - `scripts/cache_multimodal_features.py`：新增 ffmpeg 音频加载回退 + Whisper mel 固定长度 padding
+
+---
+
+## 2026-05-28：ASR 文本替换 + 端到端部分解冻实验
+
+### 概要
+
+按路线图 8.1 和 8.2 节，完成了 ASR 文本替换方案的全量训练，以及端到端解冻 Whisper 最后 2 层的实验。**核心发现：ASR + 预缓存 MLP 方案最优（F1=1.0，训练 5 分钟），端到端解冻性价比低（F1=0.995，训练 3 小时）。**
+
+---
+
+### 实验一：ASR 文本替换 prompt 文本（路线图 8.1）
+
+#### Step 1：缓存 ASR 训练集特征
+
+```
+python scripts/cache_multimodal_features.py \
+  --json-path data/binary_classification/binary_classification/train.json \
+  --data-root data \
+  --output artifacts/features/binary_train_whisper_small_asr_roberta.pt \
+  --use-asr \
+  --limit 4000 \
+  --batch-size 8
+```
+
+- **结果**：4000 行，1 小时 12 分钟，输出文件 20 MB
+- **速度**：平均 8.68s/batch（含 Whisper ASR 转录 + RoBERTa 编码）
+
+#### Step 2：缓存 ASR 测试集特征
+
+同上，替换为 test.json，limit=400。
+
+- **结果**：400 行，约 7 分钟，输出文件 2.0 MB
+
+#### Step 3：训练 ASR 融合分类器
+
+```
+python scripts/train_fusion_classifier.py \
+  --train-cache artifacts/features/binary_train_whisper_small_asr_roberta.pt \
+  --test-cache artifacts/features/binary_test_whisper_small_asr_roberta.pt \
+  --output-dir runs/binary_fusion_whisper_small_asr_roberta \
+  --epochs 20
+```
+
+**最佳 epoch 指标**（Epoch 11, 12, 15, 17, 18, 20 均达到 F1=1.0）：
+
+| 指标 | 值 |
+|------|-----|
+| Accuracy | 1.0000 |
+| Precision | 1.0000 |
+| Recall | 1.0000 |
+| F1 | 1.0000 |
+| TP | 200 |
+| TN | 200 |
+| FP | 0 |
+| FN | 0 |
+
+各 epoch 指标走势：
+
+| Epoch | Acc | Prec | Recall | F1 | FN | FP |
+|-------|-----|------|--------|-----|-----|-----|
+| 1 | 0.9675 | 1.0000 | 0.9350 | 0.9664 | 13 | 0 |
+| 2 | 0.9875 | 1.0000 | 0.9750 | 0.9873 | 5 | 0 |
+| 3 | 0.9950 | 0.9901 | 1.0000 | 0.9950 | 0 | 2 |
+| 4 | 0.9975 | 1.0000 | 0.9950 | 0.9975 | 1 | 0 |
+| **11** | **1.0000** | **1.0000** | **1.0000** | **1.0000** | **0** | **0** |
+| 20 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 0 | 0 |
+
+**对比非 ASR 基线**：
+
+| 指标 | 非 ASR（prompt）| ASR（转写文本）|
+|------|----------------|---------------|
+| Epoch 1 F1 | 0.902 | **0.966** |
+| Epoch 4 F1 | 0.985 | **0.998** |
+| 首次完美 | Epoch 16 | **Epoch 11** |
+| 20 epoch 完美次数 | 1 次 | **6 次** |
+
+**结论**：ASR 转写文本比原始 prompt 文本提供更强的区分度，收敛速度显著更快，稳定性更好。
+
+---
+
+### 实验二：端到端部分解冻 Whisper（路线图 8.2）
+
+#### 方案设计
+
+采用混合方案：Whisper 编码器在线加载（前 10 层冻结，最后 2 层可训练），文本分支使用预缓存的 ASR text embeddings（跳过 RoBERTa 在线加载），MLP 融合头可训练。
+
+- 可训练参数：14.57M（Whisper 最后 2 层 14.2M + MLP 头 ~0.2M）
+- 有效 batch size：8（batch_size=1 × grad_accum=8）
+- AMP fp16 混合精度
+
+#### 代码变更
+
+1. **`src/teledeceit/training.py`**：`train_one_epoch` 新增 `grad_accum` 和 `scaler` 参数，支持梯度累积 + AMP
+2. **`src/teledeceit/model.py`**：新增 `E2EFusionClassifier`（在线音频编码器 + 预缓存文本 embedding + MLP）
+3. **`scripts/train_e2e_fusion.py`**（新增）：端到端训练脚本，支持 Whisper 选择性解冻、梯度累积、AMP
+
+#### 小规模烟雾测试
+
+```
+--limit 32 --epochs 2
+```
+
+- Epoch 1: F1=0.79, Epoch 2: F1=0.84
+- 无 OOM，管线完整跑通
+
+#### 全量训练
+
+```
+python scripts/train_e2e_fusion.py \
+  --train-cache artifacts/features/binary_train_whisper_small_asr_roberta.pt \
+  --test-cache artifacts/features/binary_test_whisper_small_asr_roberta.pt \
+  --output-dir runs/binary_e2e_asr \
+  --epochs 10 \
+  --batch-size 1 \
+  --grad-accum 8 \
+  --lr 5e-5 \
+  --unfreeze-layers 2
+```
+
+- **耗时**：约 3 小时
+- **模型大小**：338 MB（含完整 Whisper 编码器权重）
+
+各 epoch 指标：
+
+| Epoch | Acc | Prec | Recall | F1 | FN | FP |
+|-------|-----|------|--------|-----|-----|-----|
+| 1 | 0.9650 | 1.0000 | 0.9300 | 0.9637 | 14 | 0 |
+| 2 | 0.9775 | 0.9948 | 0.9600 | 0.9771 | 8 | 1 |
+| 3 | 0.9875 | 0.9851 | 0.9900 | 0.9875 | 2 | 3 |
+| **4** | **0.9950** | **1.0000** | **0.9900** | **0.9950** | **2** | **0** |
+| 5-10 | 0.9925 | 1.0000 | 0.9850 | 0.9924 | 3 | 0 |
+
+**现象**：epoch 4 即达最佳，之后 train_loss → 0 但 test 指标不再改善（过拟合）。
+
+---
+
+### 三种方案最终对比
+
+| 方案 | 最佳 F1 | 最佳 epoch | FN | FP | 模型大小 | 训练时间 |
+|------|---------|-----------|-----|-----|----------|----------|
+| 非 ASR（prompt 原文）| **1.000** | 16 | 0 | 0 | 1.6 MB | ~5 min |
+| ASR + MLP（预缓存）| **1.000** | 11 | 0 | 0 | 1.6 MB | ~5 min |
+| ASR + E2E（解冻 2 层）| 0.995 | 4 | 2 | 0 | 338 MB | ~3 h |
+
+### 结论与建议
+
+1. **推荐部署方案**：ASR 转写文本 + 预缓存 MLP 融合分类器，模型小（1.6 MB）、训练快（5 分钟）、指标完美（F1=1.0）
+2. **E2E 解冻不推荐**：在 3060 6GB 条件下，batch size 受限（有效仅 8），梯度噪声大，容易过拟合，性价比远低于预缓存方案
+3. **ASR 文本优于 prompt**：无论 MLP 还是 E2E，ASR 转写文本的区分度都显著高于原始 prompt 文本，是关键的提升点
+
+### 生成文件
+
+```
+artifacts/features/
+  binary_train_whisper_small_asr_roberta.pt   (20 MB, 4000 条)
+  binary_test_whisper_small_asr_roberta.pt    (2.0 MB, 400 条)
+
+runs/binary_fusion_whisper_small_asr_roberta/
+  best_model.pt                               (1.6 MB)
+  metrics.json                                (20 epoch)
+
+runs/binary_e2e_asr/
+  best_model.pt                               (338 MB)
+  metrics.json                                (10 epoch)
+```
