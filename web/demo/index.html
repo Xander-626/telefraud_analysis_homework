@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TeleAntiFraud 电诈检测演示工作台</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Deep Learning Course Demo</p>
+          <h1>TeleAntiFraud 电诈检测演示工作台</h1>
+        </div>
+        <div class="model-pill">Whisper-small ASR + Chinese RoBERTa + MLP</div>
+      </header>
+
+      <section class="workspace" aria-label="电诈检测工作台">
+        <section class="input-panel" aria-label="输入区">
+          <div class="tabs" role="tablist" aria-label="输入方式">
+            <button class="tab-button active" type="button" data-tab="samples">预置样例</button>
+            <button class="tab-button" type="button" data-tab="upload">上传检测</button>
+            <button class="tab-button" type="button" data-tab="text">文本检测</button>
+          </div>
+
+          <div class="tab-pane active" id="samples-pane">
+            <div id="sample-list" class="sample-list" aria-live="polite"></div>
+          </div>
+
+          <div class="tab-pane" id="upload-pane">
+            <label class="upload-box" for="audio-file">
+              <span class="upload-title">选择通话音频</span>
+              <span class="upload-hint">支持 mp3 / wav；答辩主路径优先使用预置样例</span>
+              <input id="audio-file" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav">
+            </label>
+            <p id="upload-name" class="subtle">未选择文件</p>
+            <button id="upload-detect" class="primary-button" type="button">检测上传音频</button>
+          </div>
+
+          <div class="tab-pane" id="text-pane">
+            <label class="field-label" for="text-input">通话文本或 ASR 转写</label>
+            <textarea id="text-input" rows="8" placeholder="例如：请马上转账到安全账户，否则银行卡会被冻结"></textarea>
+            <button id="text-detect" class="primary-button" type="button">检测文本</button>
+          </div>
+        </section>
+
+        <section id="result-panel" class="result-panel" aria-live="polite">
+          <div class="result-empty">
+            <p class="eyebrow">Model Flow</p>
+            <h2>音频与文本融合检测</h2>
+            <div class="flow-row">
+              <span>音频输入</span>
+              <span>Whisper-small</span>
+              <span>RoBERTa</span>
+              <span>MLP 融合分类</span>
+              <span>normal / fraud</span>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="metrics-band" aria-label="实验指标">
+        <div class="metric-tile">
+          <span>测试集</span>
+          <strong>400</strong>
+        </div>
+        <div class="metric-tile">
+          <span>Accuracy</span>
+          <strong>1.000</strong>
+        </div>
+        <div class="metric-tile">
+          <span>Precision</span>
+          <strong>1.000</strong>
+        </div>
+        <div class="metric-tile">
+          <span>Recall</span>
+          <strong>1.000</strong>
+        </div>
+        <div class="metric-tile">
+          <span>F1</span>
+          <strong>1.000</strong>
+        </div>
+        <div class="metric-tile">
+          <span>FP / FN</span>
+          <strong>0 / 0</strong>
+        </div>
+      </section>
+
+      <section class="comparison" aria-label="方案对比">
+        <table>
+          <thead>
+            <tr>
+              <th>方案</th>
+              <th>最佳 F1</th>
+              <th>模型大小</th>
+              <th>训练时间</th>
+              <th>答辩结论</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Prompt + MLP</td>
+              <td>1.000</td>
+              <td>1.6 MB</td>
+              <td>约 5 min</td>
+              <td>基线可用</td>
+            </tr>
+            <tr class="recommended-row">
+              <td>ASR + MLP</td>
+              <td>1.000</td>
+              <td>1.6 MB</td>
+              <td>约 5 min</td>
+              <td>推荐部署</td>
+            </tr>
+            <tr>
+              <td>ASR + E2E</td>
+              <td>0.995</td>
+              <td>338 MB</td>
+              <td>约 3 h</td>
+              <td>性价比较低</td>
+            </tr>
+            <tr>
+              <td>SFT/LoRA</td>
+              <td>smoke test</td>
+              <td>adapter</td>
+              <td>较长</td>
+              <td>后续扩展</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
