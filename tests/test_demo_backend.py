@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from scripts.serve_demo import build_api_response
 from teledeceit.demo_backend import (
     DEMO_MODEL_NAME,
     build_text_prediction,
@@ -55,6 +56,31 @@ class DemoBackendTest(unittest.TestCase):
     def test_empty_text_prediction_rejects_input(self):
         with self.assertRaises(ValueError):
             build_text_prediction("   ")
+
+
+class DemoServerHelperTest(unittest.TestCase):
+    def test_build_api_response_lists_samples(self):
+        status, payload = build_api_response("GET", "/api/demo/samples", b"")
+
+        self.assertEqual(status, 200)
+        self.assertIn("samples", payload)
+        self.assertGreaterEqual(len(payload["samples"]), 3)
+
+    def test_build_api_response_predicts_sample(self):
+        status, payload = build_api_response(
+            "POST",
+            "/api/demo/predict-sample",
+            b'{"sample_id": "normal_example"}',
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["prediction"], "normal")
+
+    def test_build_api_response_rejects_missing_text(self):
+        status, payload = build_api_response("POST", "/api/predict", b'{"text": ""}')
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
 
 
 if __name__ == "__main__":
