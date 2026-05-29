@@ -102,3 +102,65 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
+
+
+@torch.no_grad()
+def evaluate_sft_binary(
+    model,
+    tokenizer,
+    dataloader: DataLoader,
+    device: torch.device,
+    max_new_tokens: int = 200,
+) -> dict[str, float | int]:
+    """Evaluate SFT model by generating responses and parsing binary fraud labels.
+
+    Uses the prompt_templates.parse_fraud_binary_response() to extract
+    is_fraud from generated text, then computes standard binary metrics.
+    """
+    from teledeceit.metrics import compute_binary_metrics
+    from teledeceit.prompt_templates import parse_fraud_binary_response
+
+    model.eval()
+    preds: list[int] = []
+    labels: list[int] = []
+    parse_failures = 0
+
+    for batch in dataloader:
+        batch = _move_batch(batch, device)
+        input_ids = batch.get("input_ids")
+        attention_mask = batch.get("attention_mask")
+        binary_labels = batch.get("binary_label")
+
+        if input_ids is None:
+            continue
+
+        # Generate responses
+        generated = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=0.1,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+
+        # Decode only the new tokens
+        prompt_len = input_ids.shape[-1]
+        for i in range(generated.shape[0]):
+            response_ids = generated[i][prompt_len:]
+            response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
+            parsed = parse_fraud_binary_response(response_text)
+
+            if parsed is not None:
+                preds.append(parsed)
+                if binary_labels is not None:
+                    labels.append(int(binary_labels[i].item()))
+            else:
+                parse_failures += 1
+
+    metrics: dict[str, float | int] = {"parse_failures": parse_failures}
+    if preds:
+        preds_t = torch.tensor(preds)
+        labels_t = torch.tensor(labels)
+        metrics.update(compute_binary_metrics(preds_t, labels_t))
+    return metrics

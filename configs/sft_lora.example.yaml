@@ -1,0 +1,62 @@
+# SFT LoRA Training Configuration
+# For RTX 3060 Laptop GPU (6 GB VRAM)
+# Whisper-small ASR -> Qwen2.5-1.5B-Instruct QLoRA
+
+data:
+  train_jsonl: data/sft/sft/train.jsonl
+  test_jsonl: data/sft/sft/test.jsonl
+  data_root: data
+  task_filter: FRAUD_BINARY   # FRAUD_BINARY | FRAUD_TYPE | ALL_BINARY
+
+asr:
+  model_name: openai/whisper-small
+  max_audio_seconds: 30
+  transcription_cache: artifacts/sft_transcriptions.pt
+
+model:
+  name: Qwen/Qwen2.5-1.5B-Instruct
+  # fallback if OOM: Qwen/Qwen2.5-0.5B-Instruct
+
+quantization:
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: float16
+  bnb_4bit_quant_type: nf4
+  bnb_4bit_use_double_quant: true
+
+lora:
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+training:
+  epochs: 3
+  batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  max_seq_length: 2048
+  warmup_ratio: 0.03
+  lr_scheduler: cosine
+
+generation:
+  max_new_tokens: 200
+  temperature: 0.1
+  do_sample: false
+
+output:
+  dir: runs/sft_lora_fraud_binary
+
+hard_case_screening:
+  enabled: false
+  binary_checkpoint: runs/binary_fusion_whisper_small_asr_roberta/best_model.pt
+  confidence_threshold: 0.9
+  keep_misclassified: true

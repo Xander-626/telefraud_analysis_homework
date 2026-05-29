@@ -326,3 +326,125 @@ runs/binary_e2e_asr/
   best_model.pt                               (338 MB)
   metrics.json                                (10 epoch)
 ```
+
+---
+
+## 2026-05-29：SFT/LoRA 音频指令微调（路线图 8.3）
+
+### 概要
+
+按路线图 8.3 节，搭建了 Whisper-small ASR → Qwen2.5-1.5B-Instruct 4-bit QLoRA 级联架构。由于本机是笔记本 RTX 3060（6GB VRAM），无法直接加载 Qwen2-Audio-7B（4-bit 权重 ~4GB + 优化器 + 激活值 > 6GB），采用级联方案替代。
+
+### 架构
+
+```
+Whisper-small (ASR转写) → 中文转写文本 → Qwen2.5-1.5B-Instruct (4-bit QLoRA)
+                                              ↓
+                                   生成 JSON → 解析 is_fraud → 二分类评估
+```
+
+VRAM 峰值 ~3.2GB/6GB，安全余量充足。
+
+### 环境准备
+
+安装新依赖：
+
+```
+pip install bitsandbytes peft accelerate
+```
+
+- bitsandbytes 0.49.2
+- peft 0.19.1
+- accelerate 1.13.0
+
+### 新增代码
+
+| 文件 | 说明 |
+|------|------|
+| `src/teledeceit/sft_data.py` | SFT JSONL 数据加载器，按任务模式分类（SCENE_ONLY / FRAUD_BINARY / FRAUD_TYPE），提取二分类标签 |
+| `src/teledeceit/prompt_templates.py` | 指令模板格式化和生成文本响应解析（三层回退：JSON → 正则 → 关键词） |
+| `scripts/train_sft_lora.py` | QLoRA 训练主脚本，Whisper ASR 离线转写 + Qwen2.5 4-bit LoRA 微调 |
+| `scripts/screen_hard_cases.py` | Hard case 筛选脚本，用已有冻结分类器从 SFT 数据中筛选困难样本 |
+| `src/teledeceit/training.py` | 新增 `evaluate_sft_binary()` 生成式评估函数 |
+| `configs/sft_lora.example.yaml` | 训练配置参考 |
+| `tests/test_sft_data.py` | SFT 数据加载器单元测试（7 项） |
+| `tests/test_prompt_templates.py` | 提示词模板和解析单元测试（12 项） |
+
+### SFT 数据分析
+
+- **训练集**：27,146 条，其中二分类可用 16,435 条（fraud=11,448, normal=4,987）
+- **测试集**：6,807 条，其中二分类可用 4,130 条（fraud=2,906, normal=1,224）
+- **任务模式分布**：SCENE_ONLY 10,711 / FRAUD_BINARY 10,711 / FRAUD_TYPE 5,724
+- **所有音频文件**均存在于 `data/audio/` 下的 11 个子目录中
+
+### 单元测试
+
+- 26/26 全部通过（含原有 7 项 + 新增 19 项）
+
+### 烟幕测试
+
+```
+python scripts/train_sft_lora.py --limit 8 --epochs 1 \
+  --batch-size 1 --grad-accum 4 --output-dir runs/sft_lora_smoke
+```
+
+结果：
+- 模型加载成功：Qwen2.5-1.5B-Instruct 4-bit nf4 + double_quant
+- LoRA 可训练参数：9.23M / 0.90B (1.0%)
+- 训练循环正常：loss 2.84 → 2.23（8 样本/1 epoch）
+- 无 OOM，管线完整跑通
+- Whisper ASR 转录缓存正常工作
+
+### 训练超参数（全量训练用）
+
+| 参数 | 值 |
+|------|-----|
+| model | Qwen/Qwen2.5-1.5B-Instruct |
+| fallback | Qwen/Qwen2.5-0.5B-Instruct（OOM 时自动回退）|
+| 量化 | 4-bit nf4 + double_quant |
+| LoRA rank | 8, alpha=16 |
+| dropout | 0.05 |
+| target_modules | all linear (q/k/v/o/gate/up/down) |
+| batch_size | 1 |
+| grad_accum | 16（等效 batch=16）|
+| epochs | 3 |
+| lr | 2e-4, cosine + 3% warmup |
+| optimizer | paged_adamw_8bit |
+| max_seq_length | 2048 |
+| max_new_tokens | 200 |
+| eval_limit | 200（生成慢，每 epoch 仅评估 200 条）|
+
+### 全量训练命令
+
+```powershell
+python scripts/train_sft_lora.py `
+  --epochs 3 `
+  --batch-size 1 `
+  --grad-accum 16 `
+  --eval-limit 200 `
+  --output-dir runs/sft_lora_fraud_binary
+```
+
+预估时间：训练 ~20h + 评估 ~3h/epoch（200 条 × ~57s/条）。可使用 `--eval-limit 50` 加速评估。
+
+### 产出文件
+
+```
+artifacts/
+  sft_transcriptions.pt                       (Whisper ASR 转录缓存)
+
+runs/sft_lora_smoke/
+  adapter/                                    (LoRA 适配器权重)
+  metrics.json                                (烟幕测试指标)
+
+runs/sft_lora_fraud_binary/                   (全量训练后生成)
+  adapter/                                    (最佳 LoRA 适配器)
+  metrics.json                                (完整训练指标)
+  best_metrics.json                           (最佳 epoch 指标)
+```
+
+### 待完成
+
+- [ ] 运行全量 3 epoch 训练
+- [ ] 与冻结分类器（F1=1.0）在 SFT 测试子集上横向对比
+- [ ] Hard case 筛选实验（`scripts/screen_hard_cases.py`）
