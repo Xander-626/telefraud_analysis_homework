@@ -43,6 +43,14 @@ data/preview/
 # Claude Code
 .claude/
 
+# LaTeX build artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.synctex.gz
+texput.log
+
 # OS/editor
 .DS_Store
 Thumbs.db
