@@ -27,6 +27,21 @@ from teledeceit.demo_backend import (
     predict_demo_sample,
 )
 
+# Attempt to load the real model pipeline for upload detection.
+_real_detector = None
+_REAL_MODEL_AVAILABLE = False
+_MODEL_CHECKPOINT = ROOT / "runs" / "binary_fusion_whisper_small_asr_roberta" / "best_model.pt"
+try:
+    from teledeceit.inference import FraudDetector
+    if not _MODEL_CHECKPOINT.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {_MODEL_CHECKPOINT}")
+    _real_detector = FraudDetector(checkpoint=str(_MODEL_CHECKPOINT))
+    _REAL_MODEL_AVAILABLE = True
+    print(f"[serve_demo] Real-model inference ENABLED (F1={_real_detector._best_metrics.get('f1', 'N/A')})")
+except Exception as exc:
+    print(f"[serve_demo] Real-model inference unavailable: {exc}")
+    print("[serve_demo] Falling back to heuristic mode for upload detection.")
+
 
 def build_api_response(
     method: str, path: str, body: bytes, headers: dict[str, str] | None = None
@@ -113,14 +128,28 @@ def _handle_upload(body: bytes, headers: dict[str, str]) -> tuple[int, dict[str,
 
 
 def _predict_uploaded_audio(file_data: bytes, filename: str) -> tuple[int, dict[str, Any]]:
-    """Run demo prediction on an uploaded audio file."""
-    # Write to a temporary file for ffprobe analysis
+    """Run prediction on an uploaded audio file.
+
+    Uses the real Whisper + RoBERTa + MLP pipeline when available,
+    falling back to a lightweight heuristic otherwise.
+    """
     suffix = Path(filename).suffix or ".mp3"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(file_data)
         tmp_path = tmp.name
 
     try:
+        # ---- Try real-model inference first ----
+        if _REAL_MODEL_AVAILABLE and _real_detector is not None:
+            try:
+                result = _real_detector.predict(Path(tmp_path))
+                result["sample_id"] = "upload"
+                result["mode"] = "real_inference"
+                return 200, result
+            except Exception as exc:
+                print(f"[serve_demo] Real inference failed ({exc}), falling back to heuristic")
+
+        # ---- Heuristic fallback ----
         duration = None
         try:
             out = subprocess.check_output(
