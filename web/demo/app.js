@@ -4,21 +4,21 @@ const offlineSamples = [
     title: "正常通话样例",
     expected_label: "normal",
     description: "普通快递/生活通知类通话，缺少转账和威胁话术。",
-    audio_url: "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/normal_example.mp3"
+    audio_url: "/api/audio/normal_example"
   },
   {
     sample_id: "fraud_example_1",
     title: "电诈通话样例 1",
     expected_label: "fraud",
     description: "冒充官方机构，要求受害者配合资金核验。",
-    audio_url: "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/fraud_example_1.mp3"
+    audio_url: "/api/audio/fraud_example_1"
   },
   {
     sample_id: "fraud_example_2",
     title: "电诈通话样例 2",
     expected_label: "fraud",
     description: "制造紧迫感并索要验证码，符合高风险诈骗特征。",
-    audio_url: "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/fraud_example_2.mp3"
+    audio_url: "/api/audio/fraud_example_2"
   }
 ];
 

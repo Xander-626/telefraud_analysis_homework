@@ -17,7 +17,12 @@ WEB_ROOT = ROOT / "web" / "demo"
 
 sys.path.insert(0, str(SRC))
 
-from teledeceit.demo_backend import build_text_prediction, list_demo_samples, predict_demo_sample
+from teledeceit.demo_backend import (
+    build_text_prediction,
+    get_local_audio_path,
+    list_demo_samples,
+    predict_demo_sample,
+)
 
 
 def build_api_response(method: str, path: str, body: bytes) -> tuple[int, dict[str, Any]]:
@@ -50,6 +55,11 @@ def build_api_response(method: str, path: str, body: bytes) -> tuple[int, dict[s
 class DemoRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        # Audio streaming endpoint — serve local MP3 files
+        if parsed.path.startswith("/api/audio/"):
+            sample_id = parsed.path.split("/api/audio/")[-1]
+            self._send_audio(sample_id)
+            return
         if parsed.path.startswith("/api/"):
             self._send_json(*build_api_response("GET", parsed.path, b""))
             return
@@ -103,6 +113,27 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _send_audio(self, sample_id: str) -> None:
+        local_path = get_local_audio_path(sample_id)
+        if local_path is None:
+            self.send_error(404, f"No local audio for sample {sample_id}")
+            return
+        audio_file = ROOT / "data" / local_path
+        if not audio_file.exists():
+            self.send_error(404, f"Audio file not found: {local_path}")
+            return
+        try:
+            content = audio_file.read_bytes()
+            self.send_response(200)
+            self._send_common_headers()
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(content)
+        except OSError:
+            self.send_error(500, "Failed to read audio file")
 
 
 def main() -> None:

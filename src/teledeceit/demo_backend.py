@@ -25,7 +25,8 @@ _SAMPLES: list[dict[str, Any]] = [
         "title": "正常通话样例",
         "expected_label": "normal",
         "description": "普通快递/生活通知类通话，缺少转账和威胁话术。",
-        "audio_url": "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/normal_example.mp3",
+        "audio_url": "/api/audio/normal_example",
+        "local_audio": "audio/POS-imitate-4/tts_test1/tts_test1.mp3",
         "prediction": "normal",
         "fraud_probability": 0.041,
         "risk_level": "low",
@@ -37,7 +38,8 @@ _SAMPLES: list[dict[str, Any]] = [
         "title": "电诈通话样例 1",
         "expected_label": "fraud",
         "description": "冒充官方机构，要求受害者配合资金核验。",
-        "audio_url": "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/fraud_example_1.mp3",
+        "audio_url": "/api/audio/fraud_example_1",
+        "local_audio": "audio/NEG-imitate-10/tts_test1/tts_test1.mp3",
         "prediction": "fraud",
         "fraud_probability": 0.982,
         "risk_level": "high",
@@ -49,7 +51,8 @@ _SAMPLES: list[dict[str, Any]] = [
         "title": "电诈通话样例 2",
         "expected_label": "fraud",
         "description": "制造紧迫感并索要验证码，符合高风险诈骗特征。",
-        "audio_url": "https://huggingface.co/datasets/JimmyMa99/TeleAntiFraud/resolve/main/preview/fraud_example_2.mp3",
+        "audio_url": "/api/audio/fraud_example_2",
+        "local_audio": "audio/NEG-imitate-12/tts_test2731/tts_test2731.mp3",
         "prediction": "fraud",
         "fraud_probability": 0.964,
         "risk_level": "high",
@@ -69,9 +72,18 @@ def list_demo_samples() -> list[dict[str, Any]]:
             "expected_label": sample["expected_label"],
             "description": sample["description"],
             "audio_url": sample["audio_url"],
+            "local_audio": sample.get("local_audio", ""),
         }
         for sample in _SAMPLES
     ]
+
+
+def get_local_audio_path(sample_id: str) -> str | None:
+    """Return the local audio file path for a demo sample, or None."""
+    for sample in _SAMPLES:
+        if sample["sample_id"] == sample_id:
+            return sample.get("local_audio")
+    return None
 
 
 def predict_demo_sample(sample_id: str) -> dict[str, Any]:
