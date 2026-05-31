@@ -20,6 +20,18 @@ _FRAUD_KEYWORDS = [
     "中奖",
 ]
 
+# Pinyin / English equivalents for uploaded-file heuristic
+_FRAUD_KEYWORDS_EN = [
+    "fraud", "scam", "phish", "fake", "spoof",
+    "zhuanzhang", "transfer", "money",
+    "anquanzhanghu", "safety", "account",
+    "yanzhengma", "verify", "code", "otp",
+    "yinhangka", "bank", "card",
+    "dongjie", "freeze", "block",
+    "daikuan", "loan",
+    "zhongjiang", "lottery", "prize",
+]
+
 _SAMPLES: list[dict[str, Any]] = [
     {
         "sample_id": "normal_example",
@@ -135,9 +147,12 @@ def build_upload_prediction(
 ) -> dict[str, Any]:
     """Build a demo prediction result for an uploaded audio file.
 
-    In a full deployment, this would run the Whisper ASR + RoBERTa + MLP
-    pipeline on the uploaded audio.  This demo server deliberately uses a
-    lightweight heuristic to keep the server dependency-free.
+    Uses multi-signal lightweight heuristic:
+      1. Filename keyword match (Chinese + pinyin/English)
+      2. Audio duration (fraud calls average ~53s, normal ~44s in our dataset)
+      3. File size / bitrate as weak signal
+
+    In a full deployment this would run Whisper ASR + RoBERTa + MLP.
     """
     size_mb = file_size / (1024 * 1024)
     file_type = Path(filename).suffix.upper().lstrip(".")
@@ -148,17 +163,49 @@ def build_upload_prediction(
     evidence.append(f"文件格式 {file_type}")
     evidence.append(f"文件大小 {size_mb:.1f} MB")
 
-    # Lightweight heuristic: check filename for fraud-related keywords
+    # ---- Multi-signal heuristic scoring ----
+
+    # Signal 1: filename keywords (Chinese + pinyin/English)
     filename_lower = filename.lower()
-    fraud_hints = [kw for kw in _FRAUD_KEYWORDS if kw in filename_lower]
-    if fraud_hints:
-        probability = 0.65 + len(fraud_hints) * 0.05
-        prediction = "fraud"
+    cn_hints = [kw for kw in _FRAUD_KEYWORDS if kw in filename_lower]
+    en_hints = [kw for kw in _FRAUD_KEYWORDS_EN if kw in filename_lower]
+    all_hints = cn_hints + en_hints
+    keyword_score = min(len(all_hints) * 0.08, 0.35)
+
+    # Signal 2: duration-based (fraud calls avg 53s, normal avg 44s)
+    duration_score = 0.0
+    if duration is not None:
+        if duration > 80:
+            duration_score = 0.20   # unusually long, suspicious
+            evidence.append("通话时长偏长（>80 秒），与诈骗通话特征吻合")
+        elif duration > 55:
+            duration_score = 0.12   # above average, mild suspicion
+            evidence.append("通话时长中等偏长（55-80 秒）")
+        elif duration < 15:
+            duration_score = -0.05  # very short, likely not fraud
+            evidence.append("通话时长较短（<15 秒）")
+
+    # Signal 3: bitrate / size anomaly (unusually small or large files)
+    if duration is not None and duration > 0:
+        bitrate_kbps = (file_size * 8) / (duration * 1000)
+        if bitrate_kbps < 16:
+            evidence.append("音频码率较低，可能为压缩通话")
+
+    # ---- Combine scores ----
+    base_probability = 0.22
+    probability = base_probability + keyword_score + max(duration_score, 0.0)
+
+    if all_hints:
+        evidence.append(f"文件名匹配可疑关键词: {', '.join(all_hints[:5])}")
+    if not all_hints and duration_score <= 0:
+        evidence.append("文件名与音频特征均未发现明显异常")
+
+    prediction = "fraud" if probability >= 0.45 else "normal"
+    if probability >= 0.75:
+        risk_level = "high"
+    elif probability >= 0.45:
         risk_level = "medium"
-        evidence.append(f"文件名包含可疑关键词: {', '.join(fraud_hints)}")
     else:
-        probability = 0.25
-        prediction = "normal"
         risk_level = "low"
 
     evidence.append("注: 演示模式使用启发式规则；完整模型需加载 Whisper + RoBERTa + MLP 流水线")
@@ -166,7 +213,7 @@ def build_upload_prediction(
     return {
         "sample_id": "upload",
         "prediction": prediction,
-        "fraud_probability": round(min(probability, 0.98), 3),
+        "fraud_probability": round(max(min(probability, 0.98), 0.05), 3),
         "risk_level": risk_level,
         "asr_text": f"[上传文件: {filename}，{file_type} 格式，{size_mb:.1f} MB]",
         "evidence": evidence,

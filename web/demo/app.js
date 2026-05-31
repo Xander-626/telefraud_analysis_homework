@@ -170,22 +170,31 @@ async function detectUpload() {
     if (!response.ok) throw new Error(payload.error || "upload api unavailable");
     renderResult({ ...payload, mode: "upload_demo" });
   } catch (error) {
-    // Offline fallback: use filename-based heuristic
+    // Offline fallback: multi-signal heuristic
     const filenameLower = file.name.toLowerCase();
-    const keywords = ["安全账户", "转账", "验证码", "银行卡", "冻结", "涉嫌", "公检法", "贷款", "中奖"];
-    const evidence = keywords.filter((kw) => filenameLower.includes(kw));
-    const probability = evidence.length > 0
-      ? Math.min(0.65 + evidence.length * 0.05, 0.98)
-      : 0.25;
+    const cnKeywords = ["安全账户", "转账", "验证码", "银行卡", "冻结", "涉嫌", "公检法", "贷款", "中奖"];
+    const enKeywords = ["fraud", "scam", "phish", "fake", "spoof", "zhuanzhang", "transfer", "anquanzhanghu", "yanzhengma", "yinhangka", "dongjie", "daikuan", "zhongjiang", "loan", "lottery", "prize"];
+    const allKeywords = cnKeywords.concat(enKeywords);
+    const hints = allKeywords.filter((kw) => filenameLower.includes(kw));
+    const keywordScore = Math.min(hints.length * 0.08, 0.35);
+    // Estimate duration from file size: ~16 kbps MP3 → seconds ≈ size_bytes / 2000
+    const estDuration = file.size / 2000;
+    let durationScore = 0;
+    if (estDuration > 80) durationScore = 0.20;
+    else if (estDuration > 55) durationScore = 0.12;
+    const probability = Math.min(0.22 + keywordScore + durationScore, 0.98);
+    const evidence = [];
+    if (hints.length > 0) evidence.push("文件名匹配可疑关键词: " + hints.slice(0, 5).join(", "));
+    if (estDuration > 55) evidence.push("音频较长（估>" + Math.round(estDuration) + "秒），与诈骗通话特征吻合");
+    if (hints.length === 0 && estDuration <= 55) evidence.push("文件名与音频特征均未发现明显异常");
+    evidence.push("注: 离线模式，建议启动服务器获得完整检测");
     renderResult({
       sample_id: "upload",
-      prediction: evidence.length > 0 ? "fraud" : "normal",
-      fraud_probability: probability,
-      risk_level: evidence.length > 0 ? "medium" : "low",
+      prediction: probability >= 0.45 ? "fraud" : "normal",
+      fraud_probability: Math.round(probability * 1000) / 1000,
+      risk_level: probability >= 0.75 ? "high" : (probability >= 0.45 ? "medium" : "low"),
       asr_text: `[上传文件: ${file.name}, ${(file.size / 1024 / 1024).toFixed(1)} MB]`,
-      evidence: evidence.length > 0
-        ? evidence.concat(["注: 离线模式，基于文件名启发式判断"])
-        : ["未发现明显诈骗关键词", "注: 离线模式，建议启动服务器获得完整检测"],
+      evidence: evidence,
       model: "Whisper-small ASR + Chinese RoBERTa + MLP Fusion Classifier",
       mode: "upload_demo"
     });
