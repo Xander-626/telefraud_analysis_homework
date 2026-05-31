@@ -217,15 +217,18 @@ def generate_responses(
         sid = sample["sample_id"]
         binary_label = sample["binary_label"]
 
-        # Extract prompt (non-masked tokens) from the training input
+        # Extract prompt tokens: everything before assistant response.
+        # Labels: -100 for system+user, real ids for assistant.
         input_ids = sample["input_ids"]  # type: ignore[arg-type]
         labels_tensor = sample["labels"]  # type: ignore[arg-type]
-        prompt_mask = labels_tensor == -100
-        if prompt_mask.any():
-            first_masked = int(prompt_mask.nonzero(as_tuple=True)[0][0].item())
+        not_masked = labels_tensor != -100
+        if not_masked.any():
+            prompt_end = int(not_masked.nonzero(as_tuple=True)[0][0].item())
         else:
-            first_masked = len(input_ids)
-        prompt_ids = input_ids[:first_masked].unsqueeze(0).to(device)
+            prompt_end = len(input_ids)
+        prompt_ids = input_ids[:prompt_end].unsqueeze(0).to(device)
+        if prompt_ids.shape[-1] == 0:
+            continue
 
         with torch.amp.autocast("cuda", enabled=True):
             generated = model.generate(
@@ -250,39 +253,47 @@ def generate_responses(
 
 
 def run_transcriptions(args, samples: list, device: torch.device) -> dict[str, str]:
-    """Transcribe all audio files and cache to disk."""
+    """Transcribe all audio files and cache to disk, reusing existing cache."""
     cache_path = Path(args.transcription_cache)
-    if cache_path.exists() and not args.limit:
-        print(f"Loading cached transcriptions from {cache_path}")
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+    existing: dict[str, str] = {}
+    if cache_path.exists():
+        existing = json.loads(cache_path.read_text(encoding="utf-8"))
 
-    print("Transcribing audio with Whisper-small...")
+    needed_ids = {s.sample_id for s in samples}
+    cached_ids = set(existing.keys())
+    missing_ids = needed_ids - cached_ids
+
+    if not missing_ids:
+        print(f"All {len(needed_ids)} transcriptions already cached.")
+        return {k: v for k, v in existing.items() if k in needed_ids}
+
+    print(f"Transcribing {len(missing_ids)}/{len(needed_ids)} uncached samples with Whisper-small...")
     encoder = WhisperAudioEncoder(
         model_name=args.asr_model, device=device,
         max_seconds=30.0, load_for_asr=True,
     )
 
-    transcriptions: dict[str, str] = {}
+    missing_samples = [s for s in samples if s.sample_id in missing_ids]
     batch_size = 2
-    for i in tqdm(range(0, len(samples), batch_size), desc="ASR"):
-        batch = samples[i : i + batch_size]
+    for i in tqdm(range(0, len(missing_samples), batch_size), desc="ASR"):
+        batch = missing_samples[i : i + batch_size]
         paths = [s.audio_path for s in batch]
         try:
             texts = encoder.transcribe(paths)
             for s, t in zip(batch, texts):
-                transcriptions[s.sample_id] = t
+                existing[s.sample_id] = t
         except Exception as e:
             print(f"ASR error at batch {i}: {e}")
             for s in batch:
-                transcriptions[s.sample_id] = ""
+                existing[s.sample_id] = ""
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(transcriptions, ensure_ascii=False), encoding="utf-8")
-    print(f"Cached {len(transcriptions)} transcriptions to {cache_path}")
+    cache_path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    print(f"Cached {len(existing)} total transcriptions to {cache_path}")
 
     del encoder
     torch.cuda.empty_cache()
-    return transcriptions
+    return {k: v for k, v in existing.items() if k in needed_ids}
 
 
 def main() -> None:

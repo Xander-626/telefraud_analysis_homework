@@ -445,6 +445,104 @@ runs/sft_lora_fraud_binary/                   (全量训练后生成)
 
 ### 待完成
 
-- [ ] 运行全量 3 epoch 训练
-- [ ] 与冻结分类器（F1=1.0）在 SFT 测试子集上横向对比
 - [ ] Hard case 筛选实验（`scripts/screen_hard_cases.py`）
+
+---
+
+## 2026-05-30：全量训练与评估结果（RTX 3080 服务器）
+
+### 执行概要
+
+在远程 RTX 3080（10GB）服务器上完成了全量 SFT/LoRA 训练。原始预计 37 小时（本机 3060），服务器上实际约 **6.5 小时训练 + 5 分钟评估**。
+
+### 环境
+
+- **服务器**：seetacloud RTX 3080 10GB，PyTorch 2.5.1 + CUDA 12.4
+- **镜像**：HuggingFace mirror（`HF_ENDPOINT=https://hf-mirror.com`）
+- **数据**：通过 FileZilla 上传压缩包（12GB），解压后补传缺失的 POS 目录
+
+### 训练参数
+
+| 参数 | 值 |
+|------|-----|
+| model | Qwen/Qwen2.5-1.5B-Instruct |
+| 量化 | 4-bit nf4 + double_quant |
+| LoRA | rank=8, alpha=16, all linear layers |
+| batch_size | 1 |
+| grad_accum | 8（等效 batch=8） |
+| epochs | 3 |
+| lr | 2e-4, cosine + 3% warmup |
+| optimizer | paged_adamw_8bit |
+
+### 训练曲线
+
+| Epoch | Train Loss | 评估 |
+|-------|-----------|------|
+| 1 | 0.897 | bug 导致评估未执行 |
+| 2 | 0.685 | bug 导致评估未执行 |
+| 3 | 0.553 | bug 导致评估未执行 |
+
+**训练耗时**：每 epoch 约 2h10min，总计 6.5h。
+
+### 评估结果（后补）
+
+训练脚本 `generate_responses` 存在一个 bug：`prompt_mask = labels_tensor == -100` 应改为 `not_masked = labels_tensor != -100`，错误导致 prompt 边界取反，所有样本被跳过评估。
+
+修复后使用独立评估脚本 `scripts/eval_sft_adapter.py` 在 200 条 SFT 测试集上重新评估：
+
+| 指标 | 值 |
+|------|-----|
+| Accuracy | **0.990** |
+| Precision | **1.000** |
+| Recall | **0.986** |
+| F1 | **0.993** |
+| TP | 141 |
+| TN | 57 |
+| FP | **0** |
+| FN | 2 |
+| Parse Failures | 0 |
+
+### 分析
+
+- **FP=0**：模型从未将正常通话误判为诈骗
+- **FN=2**：200 条中漏掉 2 条诈骗，召回率 98.6%
+- **格式稳定**：200 条全部输出正确 JSON，0 解析失败
+- 模型输出附带 `reason` 字段，可解释判断理由
+
+### 全方案对比
+
+| 方案 | F1 | 模型大小 | 训练时间 | 可生成解释 |
+|------|-----|---------|----------|-----------|
+| 冻结 MLP (ASR) | 1.000 | 1.6 MB | ~5 min | 否 |
+| 冻结 MLP (prompt) | 1.000 | 1.6 MB | ~5 min | 否 |
+| E2E 解冻 2 层 | 0.995 | 338 MB | ~3 h | 否 |
+| **SFT LoRA (Qwen2.5)** | **0.993** | 35 MB | ~6.5 h | **是** |
+
+> 注：前三者评估在 400 条二分类测试集，SFT/LoRA 评估在 200 条 SFT 测试子集，测试集不同。
+
+### 已知 Bug 修复
+
+`scripts/train_sft_lora.py` 中 `generate_responses` 函数：prompt 边界检测逻辑反转（`== -100` 应为 `!= -100`），已修复。
+
+### 新增文件
+
+```
+scripts/eval_sft_adapter.py                     (SFT LoRA 适配器独立评估脚本)
+
+results/                                        (服务器回传评估结果)
+  runs/sft_lora_fraud_binary/
+    adapter/                                    (LoRA 适配器权重，35MB)
+      adapter_model.safetensors
+      adapter_config.json
+    metrics.json
+    best_metrics.json
+  train.log                                     (完整训练日志)
+```
+
+### 服务器部署备忘
+
+- 数据上传：FileZilla 传输 `teledeceit_code.tar.gz`（31KB）+ `teledeceit_data.tar.gz`（11GB）
+- POS 音频补传：重新解压 `teledeceit_data.tar.gz` 覆盖
+- HF 镜像：需 `export HF_ENDPOINT=https://hf-mirror.com`
+- 评估命令：`HF_ENDPOINT=https://hf-mirror.com python -u scripts/eval_sft_adapter.py`
+- RTX 3080 10GB：推荐 `batch_size=1, grad_accum=8`
