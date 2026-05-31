@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 DEMO_MODEL_NAME = "Whisper-small ASR + Chinese RoBERTa + MLP Fusion Classifier"
@@ -124,4 +125,51 @@ def build_text_prediction(text: str) -> dict[str, Any]:
         "evidence": evidence,
         "model": DEMO_MODEL_NAME,
         "mode": "text_demo",
+    }
+
+
+def build_upload_prediction(
+    filename: str,
+    file_size: int,
+    duration: float | None = None,
+) -> dict[str, Any]:
+    """Build a demo prediction result for an uploaded audio file.
+
+    In a full deployment, this would run the Whisper ASR + RoBERTa + MLP
+    pipeline on the uploaded audio.  This demo server deliberately uses a
+    lightweight heuristic to keep the server dependency-free.
+    """
+    size_mb = file_size / (1024 * 1024)
+    file_type = Path(filename).suffix.upper().lstrip(".")
+
+    evidence = []
+    if duration is not None:
+        evidence.append(f"音频时长 {duration:.1f} 秒")
+    evidence.append(f"文件格式 {file_type}")
+    evidence.append(f"文件大小 {size_mb:.1f} MB")
+
+    # Lightweight heuristic: check filename for fraud-related keywords
+    filename_lower = filename.lower()
+    fraud_hints = [kw for kw in _FRAUD_KEYWORDS if kw in filename_lower]
+    if fraud_hints:
+        probability = 0.65 + len(fraud_hints) * 0.05
+        prediction = "fraud"
+        risk_level = "medium"
+        evidence.append(f"文件名包含可疑关键词: {', '.join(fraud_hints)}")
+    else:
+        probability = 0.25
+        prediction = "normal"
+        risk_level = "low"
+
+    evidence.append("注: 演示模式使用启发式规则；完整模型需加载 Whisper + RoBERTa + MLP 流水线")
+
+    return {
+        "sample_id": "upload",
+        "prediction": prediction,
+        "fraud_probability": round(min(probability, 0.98), 3),
+        "risk_level": risk_level,
+        "asr_text": f"[上传文件: {filename}，{file_type} 格式，{size_mb:.1f} MB]",
+        "evidence": evidence,
+        "model": DEMO_MODEL_NAME,
+        "mode": "upload_demo",
     }

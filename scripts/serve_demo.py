@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import subprocess
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -19,13 +21,16 @@ sys.path.insert(0, str(SRC))
 
 from teledeceit.demo_backend import (
     build_text_prediction,
+    build_upload_prediction,
     get_local_audio_path,
     list_demo_samples,
     predict_demo_sample,
 )
 
 
-def build_api_response(method: str, path: str, body: bytes) -> tuple[int, dict[str, Any]]:
+def build_api_response(
+    method: str, path: str, body: bytes, headers: dict[str, str] | None = None
+) -> tuple[int, dict[str, Any]]:
     """Build a JSON response for demo API routes."""
 
     if method == "GET" and path == "/api/demo/samples":
@@ -39,6 +44,9 @@ def build_api_response(method: str, path: str, body: bytes) -> tuple[int, dict[s
         except KeyError:
             return 404, {"error": f"Unknown sample_id: {sample_id}"}
 
+    if method == "POST" and path == "/api/predict/upload":
+        return _handle_upload(body, headers or {})
+
     if method == "POST" and path == "/api/predict":
         payload = _json_body(body)
         text = payload.get("text")
@@ -47,9 +55,91 @@ def build_api_response(method: str, path: str, body: bytes) -> tuple[int, dict[s
                 return 200, build_text_prediction(text)
             except ValueError as exc:
                 return 400, {"error": str(exc)}
-        return 501, {"error": "Audio upload is a secondary demo path and is not enabled in this lightweight server."}
+        return 400, {"error": "text field is required"}
 
     return 404, {"error": f"No demo API route for {method} {path}"}
+
+
+def _handle_upload(body: bytes, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    """Parse multipart upload and run demo prediction."""
+    content_type = headers.get("Content-Type", headers.get("content-type", ""))
+    if "multipart/form-data" not in content_type:
+        # Try raw binary upload (the file content directly)
+        return _predict_uploaded_audio(body, "uploaded_audio")
+
+    # Extract boundary from Content-Type: multipart/form-data; boundary=----XXX
+    boundary = None
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.startswith("boundary="):
+            boundary = part[len("boundary="):].strip('"')
+            break
+
+    if not boundary:
+        return 400, {"error": "Could not parse multipart boundary"}
+
+    boundary_bytes = boundary.encode("utf-8")
+    parts = body.split(b"--" + boundary_bytes)
+    for part in parts:
+        if b"Content-Disposition" not in part:
+            continue
+        # Find the double CRLF that separates headers from body
+        header_end = part.find(b"\r\n\r\n")
+        if header_end == -1:
+            continue
+        file_data = part[header_end + 4:]
+        # Strip trailing boundary markers
+        if file_data.endswith(b"\r\n"):
+            file_data = file_data[:-2]
+        if file_data.endswith(b"--"):
+            file_data = file_data[:-2]
+        if file_data.endswith(b"\r\n"):
+            file_data = file_data[:-2]
+
+        if len(file_data) > 44:  # minimum MP3 header size
+            # Extract filename from Content-Disposition
+            headers_section = part[:header_end].decode("utf-8", errors="replace")
+            filename = "uploaded_audio"
+            for line in headers_section.split("\r\n"):
+                if "filename=" in line:
+                    fname_start = line.find('filename="') + 10
+                    fname_end = line.find('"', fname_start)
+                    if fname_start >= 10 and fname_end > fname_start:
+                        filename = line[fname_start:fname_end]
+                    break
+            return _predict_uploaded_audio(file_data, filename)
+
+    return 400, {"error": "No file data found in upload"}
+
+
+def _predict_uploaded_audio(file_data: bytes, filename: str) -> tuple[int, dict[str, Any]]:
+    """Run demo prediction on an uploaded audio file."""
+    # Write to a temporary file for ffprobe analysis
+    suffix = Path(filename).suffix or ".mp3"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file_data)
+        tmp_path = tmp.name
+
+    try:
+        duration = None
+        try:
+            out = subprocess.check_output(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", tmp_path],
+                stderr=subprocess.DEVNULL, timeout=10,
+            )
+            duration = float(out.decode().strip())
+        except Exception:
+            pass
+
+        result = build_upload_prediction(
+            filename=filename,
+            file_size=len(file_data),
+            duration=duration,
+        )
+        return 200, result
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 class DemoRequestHandler(BaseHTTPRequestHandler):
@@ -69,7 +159,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
-        self._send_json(*build_api_response("POST", parsed.path, body))
+        # Pass headers dict for multipart boundary parsing
+        req_headers = {k: v for k, v in self.headers.items()}
+        self._send_json(*build_api_response("POST", parsed.path, body, req_headers))
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
