@@ -99,15 +99,39 @@ def get_local_audio_path(sample_id: str) -> str | None:
     return None
 
 
-def predict_demo_sample(sample_id: str) -> dict[str, Any]:
-    """Return the deterministic prediction payload for a preset demo sample."""
+def predict_demo_sample(
+    sample_id: str, detector: Any = None, data_root: Path | None = None
+) -> dict[str, Any]:
+    """Return a prediction for a preset demo sample.
 
-    for sample in _SAMPLES:
-        if sample["sample_id"] == sample_id:
-            result = deepcopy(sample)
-            result["model"] = DEMO_MODEL_NAME
-            return result
-    raise KeyError(sample_id)
+    When `detector` (FraudDetector) is available, runs real model inference
+    on the sample's local audio file.  Falls back to the hardcoded demo data
+    otherwise (e.g. offline mode or model not loaded).
+    """
+    sample = next((s for s in _SAMPLES if s["sample_id"] == sample_id), None)
+    if sample is None:
+        raise KeyError(sample_id)
+
+    # ---- Try real inference ----
+    if detector is not None and sample.get("local_audio"):
+        audio_path = (data_root or Path("data")) / sample["local_audio"]
+        if audio_path.exists():
+            try:
+                result = detector.predict(audio_path)
+                result["sample_id"] = sample_id
+                result["title"] = sample["title"]
+                result["expected_label"] = sample["expected_label"]
+                result["description"] = sample["description"]
+                result["mode"] = "real_inference"
+                return result
+            except Exception:
+                pass  # fall through to hardcoded
+
+    # ---- Hardcoded fallback ----
+    result = deepcopy(sample)
+    result["model"] = DEMO_MODEL_NAME
+    result["mode"] = "demo_fallback"
+    return result
 
 
 def build_text_prediction(text: str) -> dict[str, Any]:

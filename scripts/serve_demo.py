@@ -55,7 +55,9 @@ def build_api_response(
         payload = _json_body(body)
         sample_id = str(payload.get("sample_id", ""))
         try:
-            return 200, predict_demo_sample(sample_id)
+            return 200, predict_demo_sample(
+                sample_id, detector=_real_detector, data_root=ROOT / "data",
+            )
         except KeyError:
             return 404, {"error": f"Unknown sample_id: {sample_id}"}
 
