@@ -6,9 +6,12 @@ The downstream classifier can then train quickly on an 8 GB GPU.
 
 from __future__ import annotations
 
+import os
 import argparse
 from pathlib import Path
 import sys
+
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 import torch
 from tqdm import tqdm

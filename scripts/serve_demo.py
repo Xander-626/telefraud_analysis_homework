@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import mimetypes
 import subprocess
+
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path

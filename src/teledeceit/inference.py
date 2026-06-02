@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+
 import numpy as np
 import torch
+
+# Suppress the safetensors_conversion background thread that hits a 403
+# on repos with disabled discussions (hfl/chinese-roberta-wwm-ext).
+import transformers.safetensors_conversion as _sfc
+_sfc.auto_conversion = lambda *a, **kw: None
+
 from transformers import (
     AutoModel,
     AutoTokenizer,
