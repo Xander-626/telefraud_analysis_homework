@@ -73,8 +73,10 @@ class FraudDetector:
         text_model: str = "hfl/chinese-roberta-wwm-ext",
         checkpoint: str = "runs/binary_fusion_whisper_small_asr_roberta/best_model.pt",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        temperature: float = 20.0,
     ) -> None:
         self.device = torch.device(device)
+        self.temperature = temperature
         print(f"[FraudDetector] Loading models on {self.device}...")
 
         # ---- Whisper processor (mel extraction) + encoder-only model ----
@@ -193,7 +195,9 @@ class FraudDetector:
             audio_features=audio_emb.unsqueeze(0),
             text_features=text_emb.unsqueeze(0),
         ).logits
-        probs = torch.softmax(logits, dim=-1).squeeze(0)
+        # Temperature-scaled softmax — raw logits are extremely polarized
+        # (F1=1.0 model), so T>1 spreads probabilities for more informative demo scores
+        probs = torch.softmax(logits / self.temperature, dim=-1).squeeze(0)
         fraud_prob = float(probs[1].cpu())
         pred_idx = int(logits.argmax(dim=-1).cpu().item())
         t2 = time.perf_counter()
